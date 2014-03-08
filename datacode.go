@@ -3,8 +3,8 @@ package main
 import (
 	"bytes"
 	"compress/flate"
-	"encoding/base64"
 	"flag"
+	"fmt"
 	"go/build"
 	"go/format"
 	"io/ioutil"
@@ -17,19 +17,18 @@ import (
 )
 
 var (
-	out      = flag.String("o", "data.go", "Output file")
+	out      = flag.String("out", "data.go", "Output file")
 	prefix   = flag.String("prefix", "", "Prefix to strip from filenames")
 	suffix   = flag.String("suffix", "", "Suffix to strip from filenames")
 	compress = flag.Bool("compress", true, "Use compression")
 	override = flag.String("pkg", "", "Override package name")
-	gofmt    = flag.Bool("fmt", true, "Run output through gofmt")
+	gofmt    = flag.Bool("format", true, "Run output through gofmt")
 	level    = flag.Int("level", flate.DefaultCompression, "Compression Level")
-	force    = flag.Bool("f", false, "Force overwrite of existing file")
+	force    = flag.Bool("force", false, "Force overwrite of existing file")
 )
 
 const tmplText = `package {{ .Package }}
 import (
-	"encoding/base64"
 	"bytes"
 	"strings"
 	"io"
@@ -39,11 +38,11 @@ import (
 )
 {{ range .Files }}
 func {{.Func}} () ([]byte, error) {
-	data := "{{.Base64}}"
-	b64 := base64.NewDecoder(base64.StdEncoding, strings.NewReader(data))
+	data := "{{.Raw}}"
+	in := strings.NewReader(data)
 	out := new(bytes.Buffer)
 	{{ if .Compress }}
-	r := flate.NewReader(b64)
+	r := flate.NewReader(in)
 	if _, err := io.Copy(out,r) ; err != nil {
 		return nil, err
 	}
@@ -51,7 +50,7 @@ func {{.Func}} () ([]byte, error) {
 		return nil, err
 	}
 	{{ else }}
-	if _, err := io.Copy(out, b64) ; err != nil {
+	if _, err := io.Copy(out, in) ; err != nil {
 		return nil, err
 	}
 	{{ end }}
@@ -143,12 +142,20 @@ type file struct {
 	Path string
 }
 
-func (c *config) Files() []file {
+func (c *config) Files() ([]file, error) {
 	out := make([]file, 0, len(c.Args))
 	for _, arg := range c.Args {
 		out = append(out, file{Path: arg, config: c})
 	}
-	return out
+	exists := make(map[string]bool, len(out))
+	for _, f := range out {
+		fname := f.Func()
+		if exists[fname] {
+			return nil, fmt.Errorf("duplicate function detected: %s", fname)
+		}
+		exists[fname] = true
+	}
+	return out, nil
 }
 
 func (f *file) Func() string {
@@ -198,18 +205,15 @@ func (f *file) data() ([]byte, error) {
 	return data, nil
 }
 
-func (f *file) Base64() (string, error) {
+func (f *file) Raw() (string, error) {
 	data, err := f.data()
 	if err != nil {
 		return "", err
 	}
 	out := new(bytes.Buffer)
-	enc := base64.NewEncoder(base64.StdEncoding, out)
-	if _, err := enc.Write(data); err != nil {
-		return "", err
+	for _, b := range data {
+		fmt.Fprintf(out, "\\x%.2x", b)
 	}
-	if err := enc.Close(); err != nil {
-		return "", err
-	}
+	fmt.Println(out.String())
 	return out.String(), nil
 }
